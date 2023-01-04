@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -9,10 +10,13 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
 using Play.Common.MongoDB;
 using Play.Inventory.Service.Clients;
 using Play.Inventory.Service.Entities;
+using Polly;
+using Polly.Timeout;
 
 namespace Play.Inventory.Service
 {
@@ -30,11 +34,22 @@ namespace Play.Inventory.Service
     {
       services.AddMongo()
             .AddMongoRepository<InventoryItem>("inventoryItems");
+      Random jitterer = new Random();
 
       services.AddHttpClient<CatalogClient>(client =>
       {
         client.BaseAddress = new Uri("https://localhost:5001");
-      });
+      })
+      .AddTransientHttpErrorPolicy(builder => builder.Or<TimeoutRejectedException>().WaitAndRetryAsync(
+        5, retryAttempt=> TimeSpan.FromSeconds(Math.Pow(2,retryAttempt))
+                    + TimeSpan.FromMilliseconds(jitterer.Next(0,1000)),
+        onRetry:(outcome, timespan,retryAttempt)=>{
+          var serviceProvider = services.BuildServiceProvider();
+          serviceProvider.GetService<ILogger<CatalogClient>>()?
+          .LogWarning($"Delaying for {timespan.TotalSeconds} seconds, then making retry {retryAttempt}");
+        }
+      ))
+      .AddPolicyHandler(Policy.TimeoutAsync<HttpResponseMessage>(1));
 
       services.AddControllers();
       services.AddSwaggerGen(c =>
